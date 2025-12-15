@@ -1,12 +1,13 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-import pandas as pd
 from fastapi.middleware.cors import CORSMiddleware
+import pandas as pd
 import difflib
 
 app = FastAPI()
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,49 +16,60 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-movies_data = pd.read_csv("movies.csv")
-
-selected_features = ["genres", "keywords", "tagline", "cast", "director"]
-
-for feature in selected_features:
-  movies_data[feature] = movies_data[feature].fillna("")
-
-combined_features = movies_data['genres']+' '+ movies_data['keywords']+' '+ movies_data['tagline']+' '+ movies_data['cast']+' '+ movies_data['director']
-
-vectorizer = TfidfVectorizer()
-feature_vectors = vectorizer.fit_transform(combined_features)
-
-similarity = cosine_similarity(feature_vectors)
-
-list_of_all_titles = movies_data['title'].to_list()
+movies_data = None
+similarity = None
+titles = None
 
 class MovieRequest(BaseModel):
     movie: str
 
+@app.on_event("startup")
+def load_model():
+    global movies_data, similarity, titles
+
+    movies_data = pd.read_csv("movies.csv")
+
+    features = ["genres", "keywords", "tagline", "cast", "director"]
+    for f in features:
+        movies_data[f] = movies_data[f].fillna("")
+
+    combined = (
+        movies_data["genres"] + " " +
+        movies_data["keywords"] + " " +
+        movies_data["tagline"] + " " +
+        movies_data["cast"] + " " +
+        movies_data["director"]
+    )
+
+    vectorizer = TfidfVectorizer(stop_words="english")
+    vectors = vectorizer.fit_transform(combined)
+    similarity = cosine_similarity(vectors)
+
+    titles = movies_data["title"].tolist()
+
 @app.get("/")
 def root():
-   return {"message": "Movie Recommendation API"}
+    return {"status": "API running"}
 
 @app.post("/recommendation")
 def recommend(request: MovieRequest):
     movie_name = request.movie
-    find_close_match = difflib.get_close_matches(movie_name, list_of_all_titles)
-    close_match = find_close_match[0]
 
-    index_of_the_movie = movies_data[movies_data.title == close_match]['index'].values[0]
+    matches = difflib.get_close_matches(movie_name, titles, n=1)
+    if not matches:
+        raise HTTPException(status_code=404, detail="Movie not found")
 
-    similarity_score = list(enumerate(similarity[index_of_the_movie]))
+    close_match = matches[0]
+    idx = movies_data[movies_data["title"] == close_match].index[0]
 
-    sorted_similar_movies = sorted(similarity_score, key = lambda x:x[1], reverse = True)
+    scores = list(enumerate(similarity[idx]))
+    scores = sorted(scores, key=lambda x: x[1], reverse=True)[1:11]
 
-    recommendations = []
-
-    for i, movie in enumerate(sorted_similar_movies[1:30]):
-       index= movie[0]
-       title = movies_data[movies_data.index == index]['title'].values[0]
-       recommendations.append(title)
+    recommendations = [
+        movies_data.iloc[i[0]]["title"] for i in scores
+    ]
 
     return {
-       "matched_movies": close_match,
-       "recommendations": recommendations
+        "matched_movie": close_match,
+        "recommendations": recommendations
     }
